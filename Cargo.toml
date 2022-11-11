@@ -6,3 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+async-std = "1.12.0"
+env_logger = "0.9.3"
+futures = "0.3.25"
+log = "0.4.17"
+tide = "0.16.0"
+v4l = { version = "^0.13.0", features = ["v4l2"] }
