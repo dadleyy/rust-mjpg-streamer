@@ -26,7 +26,20 @@ struct SharedState {
   last_frame: async_std::sync::Arc<async_std::sync::RwLock<(std::time::Instant, Vec<u8>)>>,
 }
 
-async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
+async fn snapshot(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
+  let frame_reader = request.state().last_frame.read().await;
+
+  let response = tide::Response::builder(200)
+    .content_type("image/jpeg")
+    .body(frame_reader.1.clone())
+    .build();
+
+  drop(frame_reader);
+
+  Ok(response)
+}
+
+async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
   // Create the channel whose receiver will be used as a async reader.
   let (writer, drain) = async_std::channel::bounded(2);
   let buf_drain = futures::stream::TryStreamExt::into_async_read(drain);
@@ -174,7 +187,8 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
     }
   });
 
-  server.at("/").get(render);
+  server.at("/stream").get(stream);
+  server.at("/snapshot").get(snapshot);
 
   server
     .listen(&arguments.addr)
