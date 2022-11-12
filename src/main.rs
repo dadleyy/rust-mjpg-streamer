@@ -28,7 +28,7 @@ struct SharedState {
 
 async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
   // Create the channel whose receiver will be used as a async reader.
-  let (mut writer, drain) = async_std::channel::bounded(2);
+  let (writer, drain) = async_std::channel::bounded(2);
   let buf_drain = futures::stream::TryStreamExt::into_async_read(drain);
 
   // Prepare the response with the correct header
@@ -41,6 +41,13 @@ async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
   // from the timestamp of the last message sent on our end, send a new multipart chunk.
   async_std::task::spawn(async move {
     let mut last_frame = None;
+    let mut frame_count = 0;
+    let mut last_debug = std::time::Instant::now();
+
+    if let Err(error) = writer.send(Ok(format!("--{BOUNDARY}\r\n").as_bytes().to_vec())).await {
+      log::error!("unable to write initial boundary - {error}");
+      return;
+    }
 
     loop {
       let frame_reader = request.state().last_frame.read().await;
@@ -58,27 +65,27 @@ async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
         Some(other) if other == (*frame_reader).0 => continue,
 
         None | Some(_) => {
+          let now = std::time::Instant::now();
+          frame_count += 1;
+
+          if now.duration_since(last_debug).as_secs() > 3 {
+            log::info!("{frame_count} frames in 3 seconds");
+            last_debug = now;
+            frame_count = 0;
+          }
+
           // Start the buffer that we'll send using the boundary and some multi-part http header
           // context.
-          let mut buffer = match last_frame.is_some() {
-            // TODO: still figuring out whether or not this is necessary; strange behavior.
-            false => format!(
-              "\r\n--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
-              frame_reader.1.len(),
-              timestamp,
-            ),
-
-            true => format!(
-              "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
-              frame_reader.1.len(),
-              timestamp,
-            ),
-          }
+          let mut buffer = format!(
+            "Content-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
+            frame_reader.1.len(),
+            timestamp,
+          )
           .into_bytes();
 
           // Actually push the JPEG data into our buffer.
           buffer.extend_from_slice(frame_reader.1.as_slice());
-          buffer.extend_from_slice(b"\r\n");
+          buffer.extend_from_slice(format!("\r\n--{BOUNDARY}\r\n").as_bytes());
 
           last_frame = Some((*frame_reader).0);
 
@@ -99,31 +106,31 @@ async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
 async fn run(arguments: CommandLineArguments) -> io::Result<()> {
   let dev = Device::with_path(&arguments.device)?;
   let format = dev.format()?;
-  log::info!("Active format:\n{}", format);
+  log::info!("Active format:\n{format:?}");
 
   let params = dev.params()?;
-  log::info!("Active parameters:\n{}", params);
-
-  let mut found = false;
+  log::info!("Active parameters:\n{params:?}");
 
   log::info!("Available formats:");
-  'outer: for format in dev.enum_formats()? {
+  for format in dev.enum_formats()? {
+    log::debug!("{format:?}");
+
+    if format.fourcc != v4l::format::FourCC::new(b"MJPG") {
+      continue;
+    }
+
     for framesize in dev.enum_framesizes(format.fourcc)? {
       for discrete in framesize.size.to_discrete() {
-        if format.fourcc == v4l::format::FourCC::new(b"MJPG") {
-          dev.set_format(&v4l::Format::new(
-            discrete.width,
-            discrete.height,
-            v4l::format::FourCC::new(b"MJPG"),
-          ))?;
-          found = true;
-          break 'outer;
+        log::debug!("    Size: {}", discrete);
+
+        for frameinterval in dev.enum_frameintervals(framesize.fourcc, discrete.width, discrete.height)? {
+          log::debug!("      Interval:  {}", frameinterval);
         }
       }
     }
   }
 
-  if !found {
+  if format.fourcc != v4l::FourCC::new(b"MJPG") {
     return Err(io::Error::new(io::ErrorKind::Other, "mjpg-format not supported"));
   }
 
@@ -144,7 +151,7 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
 
     loop {
       let before = std::time::Instant::now();
-      let (buffer, _) = stream.next()?;
+      let (buffer, meta) = stream.next()?;
       let after = std::time::Instant::now();
       current_frames += 1;
       let seconds_since = before.duration_since(last_debug).as_secs();
@@ -154,14 +161,17 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
       if seconds_since > 3 {
         let frame_read_time = after.duration_since(before).as_millis();
 
-        log::info!("{current_frames} frames (in {seconds_since} seconds) {frame_read_time}ms per");
+        log::info!(
+          "{current_frames}f ({seconds_since}s) {frame_read_time}ms | {}b",
+          meta.bytesused
+        );
         last_debug = before;
         current_frames = 0;
       }
     }
   });
 
-  server.at("/image").get(render);
+  server.at("/").get(render);
 
   server
     .listen(&arguments.addr)
