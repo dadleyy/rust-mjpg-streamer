@@ -157,7 +157,7 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
       let seconds_since = before.duration_since(last_debug).as_secs();
       let mut writable_frame = frame_locker.write().await;
 
-      let copied_buffer = buffer[0..(meta.bytesused as usize)].to_vec();
+      let copied_buffer = buffer[0..=(meta.bytesused as usize)].to_vec();
 
       *writable_frame = (std::time::Instant::now(), copied_buffer);
 
