@@ -48,7 +48,7 @@ jobs:
       - name: "bundle - prepare"
         run: mkdir -p rusty-mjpg-${{ steps.vars.outputs.SHA_SHORT }}/bin
       - name: "bundle - populate"
-        run: cp target/aarch64-unknown-linux-gnu/release/rusty-mjpg rusty-mjpg/bin/rusty-mjgp
+        run: cp target/aarch64-unknown-linux-gnu/release/rusty-mjpg rusty-mjpg-${{ steps.vars.outputs.SHA_SHORT }}/bin/rusty-mjgp
       - name: "bundle - create"
         run: tar cvzf rusty-mjpg-aarch64-unknown-linux-gnu-${{ steps.vars.outputs.SHA_SHORT }}.tar.gz rusty-mjpg-${{ steps.vars.outputs.SHA_SHORT }}
 
