@@ -28,7 +28,7 @@ struct SharedState {
 
 async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
   // Create the channel whose receiver will be used as a async reader.
-  let (mut writer, drain) = futures::channel::mpsc::channel::<io::Result<Vec<u8>>>(1);
+  let (mut writer, drain) = async_std::channel::bounded(2);
   let buf_drain = futures::stream::TryStreamExt::into_async_read(drain);
 
   // Prepare the response with the correct header
@@ -40,32 +40,55 @@ async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
   // In a separate task, continously check our shared buffer's timestamp. If that value differs
   // from the timestamp of the last message sent on our end, send a new multipart chunk.
   async_std::task::spawn(async move {
-    let frame_reader = request.state().last_frame.read().await;
-    let mut last_frame = (*frame_reader).0;
-    drop(frame_reader);
+    let mut last_frame = None;
 
     loop {
       let frame_reader = request.state().last_frame.read().await;
-      if (*frame_reader).0 != last_frame {
-        last_frame = (*frame_reader).0;
-
-        // Start the buffer that we'll send using the boundary and some multi-part http header
-        // context.
-        let mut buffer = format!(
-          "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-          frame_reader.1.len(),
-        )
-        .into_bytes();
-
-        // Actually push the JPEG data into our buffer.
-        buffer.extend_from_slice(frame_reader.1.as_slice());
-        buffer.extend_from_slice(b"\r\n");
-
-        if let Err(error) = writer.try_send(Ok(buffer)) {
-          log::warn!("unable to send received data - {error}");
+      let timestamp = match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+        Err(error) => {
+          log::error!("unable to compute frame timestamp - {error}");
           break;
         }
+        Ok(timestamp) => timestamp,
+      };
+
+      let timestamp = timestamp.as_millis();
+
+      match last_frame {
+        Some(other) if other == (*frame_reader).0 => continue,
+
+        None | Some(_) => {
+          // Start the buffer that we'll send using the boundary and some multi-part http header
+          // context.
+          let mut buffer = match last_frame.is_some() {
+            // TODO: still figuring out whether or not this is necessary; strange behavior.
+            false => format!(
+              "\r\n--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
+              frame_reader.1.len(),
+              timestamp,
+            ),
+
+            true => format!(
+              "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
+              frame_reader.1.len(),
+              timestamp,
+            ),
+          }
+          .into_bytes();
+
+          // Actually push the JPEG data into our buffer.
+          buffer.extend_from_slice(frame_reader.1.as_slice());
+          buffer.extend_from_slice(b"\r\n");
+
+          last_frame = Some((*frame_reader).0);
+
+          if let Err(error) = writer.send(Ok(buffer)).await {
+            log::warn!("unable to send received data - {error}");
+            break;
+          }
+        }
       }
+
       drop(frame_reader);
     }
   });
