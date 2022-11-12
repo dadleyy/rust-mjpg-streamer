@@ -113,7 +113,7 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
         if format.fourcc == v4l::format::FourCC::new(b"MJPG") {
           dev.set_format(&v4l::Format::new(
             discrete.width,
-            discrete.width,
+            discrete.height,
             v4l::format::FourCC::new(b"MJPG"),
           ))?;
           found = true;
