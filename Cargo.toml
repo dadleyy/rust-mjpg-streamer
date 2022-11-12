@@ -1,12 +1,16 @@
 [package]
 name = "rusty-mjpg"
-version = "0.1.0"
-edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+# version for distributed binaries will be injected through environment variables during CI.
+version = "0.0.0"
+
+edition = "2021"
+authors = ["Danny Hadley <dadleyy@gmail.com>"]
+description = "an application that will stream content from an v4l capable webcam as mjpg over http"
 
 [dependencies]
 async-std = "1.12.0"
+clap = { version = "^4.0.23", features = ["derive", "cargo"] }
 env_logger = "0.9.3"
 futures = "0.3.25"
 log = "0.4.17"

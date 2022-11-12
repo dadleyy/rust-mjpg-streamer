@@ -1,9 +1,25 @@
+#![forbid(unsafe_code)]
+
 use std::io;
+
+use clap::Parser;
 
 use async_std::prelude::FutureExt;
 use v4l::device::Device;
 use v4l::io::traits::CaptureStream;
 use v4l::video::Capture;
+
+const BOUNDARY: &str = "mjpg-boundary";
+
+#[derive(Parser, Debug)]
+#[command(author, version = option_env!("RUSTY_MJPG_VERSION").unwrap_or_else(|| "dev"), about, long_about = None)]
+struct CommandLineArguments {
+  #[arg(short = 'd', long)]
+  device: String,
+
+  #[arg(short = 'a', long)]
+  addr: String,
+}
 
 #[derive(Clone, Debug)]
 struct SharedState {
@@ -11,32 +27,38 @@ struct SharedState {
 }
 
 async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
-  log::info!("has request, sending sender");
+  // Create the channel whose receiver will be used as a async reader.
   let (mut writer, drain) = futures::channel::mpsc::channel::<io::Result<Vec<u8>>>(1);
   let buf_drain = futures::stream::TryStreamExt::into_async_read(drain);
 
+  // Prepare the response with the correct header
   let response = tide::Response::builder(200)
-    .content_type("multipart/x-mixed-replace;boundary=boundarydonotcross")
+    .content_type(format!("multipart/x-mixed-replace;boundary={BOUNDARY}").as_str())
     .body(tide::Body::from_reader(buf_drain, None))
     .build();
 
+  // In a separate task, continously check our shared buffer's timestamp. If that value differs
+  // from the timestamp of the last message sent on our end, send a new multipart chunk.
   async_std::task::spawn(async move {
     let frame_reader = request.state().last_frame.read().await;
-    let mut last_frame = (*frame_reader).0.clone();
+    let mut last_frame = (*frame_reader).0;
     drop(frame_reader);
 
     loop {
       let frame_reader = request.state().last_frame.read().await;
       if (*frame_reader).0 != last_frame {
-        last_frame = (*frame_reader).0.clone();
+        last_frame = (*frame_reader).0;
 
+        // Start the buffer that we'll send using the boundary and some multi-part http header
+        // context.
         let mut buffer = format!(
-          "--boundarydonotcross\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
-          (*frame_reader).1.len()
+          "--{BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\n\r\n",
+          frame_reader.1.len(),
         )
         .into_bytes();
 
-        buffer.extend_from_slice((*frame_reader).1.as_slice());
+        // Actually push the JPEG data into our buffer.
+        buffer.extend_from_slice(frame_reader.1.as_slice());
         buffer.extend_from_slice(b"\r\n");
 
         if let Err(error) = writer.try_send(Ok(buffer)) {
@@ -51,7 +73,8 @@ async fn render(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
   Ok(response)
 }
 
-async fn run(dev: Device) -> io::Result<()> {
+async fn run(arguments: CommandLineArguments) -> io::Result<()> {
+  let dev = Device::with_path(&arguments.device)?;
   let format = dev.format()?;
   log::info!("Active format:\n{}", format);
 
@@ -85,6 +108,7 @@ async fn run(dev: Device) -> io::Result<()> {
     std::time::Instant::now(),
     Vec::with_capacity(1024),
   )));
+
   let mut server = tide::with_state(SharedState {
     last_frame: last_frame_index.clone(),
   });
@@ -117,7 +141,7 @@ async fn run(dev: Device) -> io::Result<()> {
   server.at("/image").get(render);
 
   server
-    .listen("0.0.0.0:8080")
+    .listen(&arguments.addr)
     .race(reader_thread)
     .await
     .map_err(|error| {
@@ -129,11 +153,6 @@ async fn run(dev: Device) -> io::Result<()> {
 
 fn main() -> io::Result<()> {
   env_logger::init();
-
-  let path = "/dev/video0";
-  log::info!("Using device: {}\n", path);
-
-  let dev = Device::with_path(path)?;
-
-  async_std::task::block_on(run(dev))
+  let arguments = CommandLineArguments::parse();
+  async_std::task::block_on(run(arguments))
 }

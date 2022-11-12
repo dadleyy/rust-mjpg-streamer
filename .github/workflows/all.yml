@@ -1,0 +1,81 @@
+name: all
+on:
+  push:
+  create:
+    tags:
+      - v*
+jobs:
+  # rust compilation
+  build-jammy:
+    runs-on: ubuntu-latest
+    container:
+      image: dadleyy/ubuntu-jammy-opnssl-3.x-rust-aarch64-compiler:latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "set output: verify git version"
+        run: git --version
+
+      - name: "set output: short_sha"
+        id: vars
+        run: echo "SHA_SHORT=$(echo $GITHUB_SHA | head -c 7)">>$GITHUB_OUTPUT
+      - name: "set output: verify"
+        run: echo "${{ steps.vars.outputs.SHA_SHORT }}"
+
+      - name: "apt - update"
+        run: apt-get update
+      - name: "apt - install libudev-dev"
+        run: apt-get install libudev-dev pkg-config -y
+
+      - name: "rust - download"
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs > /tmp/rustup-install.sh
+      - name: "rust - install"
+        run: sh /tmp/rustup-install.sh -y
+      - name: "rust - add target"
+        run: . $HOME/.cargo/env && rustup target add aarch64-unknown-linux-gnu
+      - name: "rust - add components"
+        run: . $HOME/.cargo/env && rustup component add --target aarch64-unknown-linux-gnu rust-std rust-src rustc-dev
+
+      # main application compliation:
+      - name: "cargo - build"
+        run: . $HOME/.cargo/env && cargo build --target aarch64-unknown-linux-gnu --release --no-default-features
+        env:
+          OPENSSL_LIB_DIR: /etc/arm-dependencies/openssl-3.0.7
+          OPENSSL_INCLUDE_DIR: /etc/arm-dependencies/openssl-3.0.7/include
+          RUSTY_MJPG_VERSION: "${{ steps.vars.outputs.SHA_SHORT }}"
+
+      # bundling + artifact generation:
+      - name: "bundle - prepare"
+        run: mkdir -p rusty-mjpg-${{ steps.vars.outputs.SHA_SHORT }}/bin
+      - name: "bundle - populate"
+        run: cp target/aarch64-unknown-linux-gnu/release/rusty-mjpg rusty-mjpg/bin/rusty-mjgp
+      - name: "bundle - create"
+        run: tar cvzf rusty-mjpg-aarch64-unknown-linux-gnu-${{ steps.vars.outputs.SHA_SHORT }}.tar.gz rusty-mjpg-${{ steps.vars.outputs.SHA_SHORT }}
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: rusty-mjpg-aarch64-unknown-linux-gnu-${{ steps.vars.outputs.SHA_SHORT }}.tar.gz
+          path: rusty-mjpg-aarch64-unknown-linux-gnu-${{ steps.vars.outputs.SHA_SHORT }}.tar.gz
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: ["build-jammy"]
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: "set output: short_sha"
+        id: vars
+        run: echo "SHA_SHORT=$(echo $GITHUB_SHA | head -c 7)">>$GITHUB_OUTPUT
+      - name: "set output: verify"
+        run: echo "${{ steps.vars.outputs.SHA_SHORT }}"
+
+      - uses: actions/download-artifact@v3
+        with:
+          name: "rusty-mjpg-aarch64-unknown-linux-gnu-${{ steps.vars.outputs.SHA_SHORT }}.tar.gz"
+      - name: release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: "./*.tar.gz"
+          generate_release_notes: true
+
