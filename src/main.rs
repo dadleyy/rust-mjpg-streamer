@@ -156,7 +156,10 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
       current_frames += 1;
       let seconds_since = before.duration_since(last_debug).as_secs();
       let mut writable_frame = frame_locker.write().await;
-      *writable_frame = (std::time::Instant::now(), buffer.to_vec());
+
+      let copied_buffer = buffer[0..(meta.bytesused as usize)].to_vec();
+
+      *writable_frame = (std::time::Instant::now(), copied_buffer);
 
       if seconds_since > 3 {
         let frame_read_time = after.duration_since(before).as_millis();
