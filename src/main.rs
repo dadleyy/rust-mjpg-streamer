@@ -24,6 +24,7 @@ struct CommandLineArguments {
 #[derive(Clone, Debug)]
 struct SharedState {
   last_frame: async_std::sync::Arc<async_std::sync::RwLock<(Option<std::time::Instant>, Vec<u8>)>>,
+  switchbox: async_std::channel::Sender<async_std::channel::Sender<()>>,
 }
 
 async fn snapshot(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
@@ -44,6 +45,10 @@ async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
   let (writer, drain) = async_std::channel::bounded(2);
   let buf_drain = futures::stream::TryStreamExt::into_async_read(drain);
 
+  // Create a channel that will be used for the video loop to tell us a new frame is ready.
+  let (sender, receiver) = async_std::channel::unbounded();
+  request.state().switchbox.send(sender).await?;
+
   // Prepare the response with the correct header
   let response = tide::Response::builder(200)
     .content_type(format!("multipart/x-mixed-replace;boundary={BOUNDARY}").as_str())
@@ -63,19 +68,37 @@ async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
     }
 
     loop {
+      // Await for our semaphore that will let us know a frame is available.
+      if let Err(error) = receiver.recv().await {
+        log::warn!("unable to pull semaphore -  {error}");
+        break;
+      }
+
+      // Calculate a milis timestamp that will be sent in our multipart chunk headers.
       let timestamp = match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
         Err(error) => {
           log::error!("unable to compute frame timestamp - {error}");
           break;
         }
         Ok(timestamp) => timestamp,
-      };
-      let timestamp = timestamp.as_millis();
+      }
+      .as_millis();
 
+      // Pull the mutext lock for read access and verify a timestamp is available and different
+      // than our last.
       let frame_reader = request.state().last_frame.read().await;
 
-      if (last_frame.is_some() && last_frame == frame_reader.0) || frame_reader.0.is_none() {
-        async_std::task::sleep(std::time::Duration::from_millis(10)).await;
+      if frame_reader.0.is_none() {
+        log::error!("no timestamp present on frame data, unexpected");
+        drop(frame_reader);
+        continue;
+      }
+
+      if last_frame.is_some() && last_frame == frame_reader.0 {
+        log::warn!(
+          "stale frame sent past semaphore ({last_frame:?} vs {:?}",
+          frame_reader.0
+        );
         drop(frame_reader);
         continue;
       }
@@ -152,9 +175,11 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
   }
 
   let last_frame_index = async_std::sync::Arc::new(async_std::sync::RwLock::new((None, Vec::with_capacity(1024))));
+  let (switchbox_register, switchbox_receiver) = async_std::channel::unbounded();
 
   let mut server = tide::with_state(SharedState {
     last_frame: last_frame_index.clone(),
+    switchbox: switchbox_register,
   });
 
   let reader_thread = async_std::task::spawn(async move {
@@ -162,6 +187,7 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
     let mut stream = v4l::prelude::MmapStream::with_buffers(&dev, v4l::buffer::Type::VideoCapture, 4).unwrap();
     let mut last_debug = std::time::Instant::now();
     let mut current_frames = 0;
+    let mut listeners = vec![];
 
     loop {
       let before = std::time::Instant::now();
@@ -170,9 +196,33 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
       current_frames += 1;
       let seconds_since = before.duration_since(last_debug).as_secs();
       let copied_buffer = buffer[0..(meta.bytesused as usize)].to_vec();
+
+      // Take a writable lock our on our frame data and replace with the most recent data.
       let mut writable_frame = frame_locker.write().await;
       *writable_frame = (Some(std::time::Instant::now()), copied_buffer);
       drop(writable_frame);
+
+      // See if we have any new web connections waiting to register their semaphore receivers.
+      if let Ok(lisener) = switchbox_receiver.try_recv() {
+        listeners.push(lisener);
+      }
+
+      // Iterate over any listener, sending our semaphore alone.
+      if !listeners.is_empty() {
+        let mut next = vec![];
+
+        for listener in listeners.drain(0..) {
+          if listener.is_closed() {
+            continue;
+          }
+
+          if let Ok(_) = listener.send(()).await {
+            next.push(listener);
+          }
+        }
+
+        listeners = next;
+      }
 
       if seconds_since > 3 {
         let frame_read_time = after.duration_since(before).as_millis();
