@@ -23,7 +23,7 @@ struct CommandLineArguments {
 
 #[derive(Clone, Debug)]
 struct SharedState {
-  last_frame: async_std::sync::Arc<async_std::sync::RwLock<(std::time::Instant, Vec<u8>)>>,
+  last_frame: async_std::sync::Arc<async_std::sync::RwLock<(Option<std::time::Instant>, Vec<u8>)>>,
 }
 
 async fn snapshot(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
@@ -63,7 +63,6 @@ async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
     }
 
     loop {
-      let frame_reader = request.state().last_frame.read().await;
       let timestamp = match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
         Err(error) => {
           log::error!("unable to compute frame timestamp - {error}");
@@ -71,42 +70,47 @@ async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
         }
         Ok(timestamp) => timestamp,
       };
-
       let timestamp = timestamp.as_millis();
 
-      match last_frame {
-        Some(other) if other == (*frame_reader).0 => continue,
+      let frame_reader = request.state().last_frame.read().await;
 
-        None | Some(_) => {
-          let now = std::time::Instant::now();
-          frame_count += 1;
+      if (last_frame.is_some() && last_frame == frame_reader.0) || frame_reader.0.is_none() {
+        async_std::task::sleep(std::time::Duration::from_millis(10)).await;
+        drop(frame_reader);
+        continue;
+      }
 
-          if now.duration_since(last_debug).as_secs() > 3 {
-            log::info!("{frame_count} frames in 3 seconds");
-            last_debug = now;
-            frame_count = 0;
-          }
+      if last_frame.is_none() {
+        log::debug!("initial frame, yay");
+      }
 
-          // Start the buffer that we'll send using the boundary and some multi-part http header
-          // context.
-          let mut buffer = format!(
-            "Content-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
-            frame_reader.1.len(),
-            timestamp,
-          )
-          .into_bytes();
+      let now = std::time::Instant::now();
+      frame_count += 1;
 
-          // Actually push the JPEG data into our buffer.
-          buffer.extend_from_slice(frame_reader.1.as_slice());
-          buffer.extend_from_slice(format!("\r\n--{BOUNDARY}\r\n").as_bytes());
+      if now.duration_since(last_debug).as_secs() > 3 {
+        log::info!("{frame_count} frames in 3 seconds");
+        last_debug = now;
+        frame_count = 0;
+      }
 
-          last_frame = Some((*frame_reader).0);
+      // Start the buffer that we'll send using the boundary and some multi-part http header
+      // context.
+      let mut buffer = format!(
+        "Content-Type: image/jpeg\r\nContent-Length: {}\r\nX-Timestamp: {}\r\n\r\n",
+        frame_reader.1.len(),
+        timestamp,
+      )
+      .into_bytes();
 
-          if let Err(error) = writer.send(Ok(buffer)).await {
-            log::warn!("unable to send received data - {error}");
-            break;
-          }
-        }
+      // Actually push the JPEG data into our buffer.
+      buffer.extend_from_slice(frame_reader.1.as_slice());
+      buffer.extend_from_slice(format!("\r\n--{BOUNDARY}\r\n").as_bytes());
+
+      last_frame = (*frame_reader).0;
+
+      if let Err(error) = writer.send(Ok(buffer)).await {
+        log::warn!("unable to send received data - {error}");
+        break;
       }
 
       drop(frame_reader);
@@ -147,10 +151,7 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
     return Err(io::Error::new(io::ErrorKind::Other, "mjpg-format not supported"));
   }
 
-  let last_frame_index = async_std::sync::Arc::new(async_std::sync::RwLock::new((
-    std::time::Instant::now(),
-    Vec::with_capacity(1024),
-  )));
+  let last_frame_index = async_std::sync::Arc::new(async_std::sync::RwLock::new((None, Vec::with_capacity(1024))));
 
   let mut server = tide::with_state(SharedState {
     last_frame: last_frame_index.clone(),
@@ -168,11 +169,10 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
       let after = std::time::Instant::now();
       current_frames += 1;
       let seconds_since = before.duration_since(last_debug).as_secs();
+      let copied_buffer = buffer[0..(meta.bytesused as usize)].to_vec();
       let mut writable_frame = frame_locker.write().await;
-
-      let copied_buffer = buffer[0..=(meta.bytesused as usize)].to_vec();
-
-      *writable_frame = (std::time::Instant::now(), copied_buffer);
+      *writable_frame = (Some(std::time::Instant::now()), copied_buffer);
+      drop(writable_frame);
 
       if seconds_since > 3 {
         let frame_read_time = after.duration_since(before).as_millis();
