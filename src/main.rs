@@ -31,6 +31,7 @@ async fn snapshot(request: tide::Request<SharedState>) -> tide::Result<tide::Res
   let frame_reader = request.state().last_frame.read().await;
 
   let response = tide::Response::builder(200)
+    .header("Access-Control-Allow-Origin", "*")
     .content_type("image/jpeg")
     .body(frame_reader.1.clone())
     .build();
@@ -38,6 +39,15 @@ async fn snapshot(request: tide::Request<SharedState>) -> tide::Result<tide::Res
   drop(frame_reader);
 
   Ok(response)
+}
+
+async fn access(_request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
+  Ok(
+    tide::Response::builder(200)
+      .header("Access-Control-Allow-Origin", "*")
+      .body("")
+      .build(),
+  )
 }
 
 async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Response> {
@@ -51,6 +61,7 @@ async fn stream(request: tide::Request<SharedState>) -> tide::Result<tide::Respo
 
   // Prepare the response with the correct header
   let response = tide::Response::builder(200)
+    .header("Access-Control-Allow-Origin", "*")
     .content_type(format!("multipart/x-mixed-replace;boundary={BOUNDARY}").as_str())
     .body(tide::Body::from_reader(buf_drain, None))
     .build();
@@ -237,6 +248,8 @@ async fn run(arguments: CommandLineArguments) -> io::Result<()> {
     }
   });
 
+  server.at("/*").head(access);
+  server.at("/*").options(access);
   server.at("/stream").get(stream);
   server.at("/snapshot").get(snapshot);
 
