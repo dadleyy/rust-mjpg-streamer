@@ -38,7 +38,7 @@ jobs:
 
       # main application compliation:
       - name: "cargo - build"
-        run: . $HOME/.cargo/env && cargo build --target aarch64-unknown-linux-gnu --release --no-default-features
+        run: . $HOME/.cargo/env && cargo build --target aarch64-unknown-linux-gnu --release --features validation
         env:
           OPENSSL_LIB_DIR: /etc/arm-dependencies/openssl-3.0.7
           OPENSSL_INCLUDE_DIR: /etc/arm-dependencies/openssl-3.0.7/include

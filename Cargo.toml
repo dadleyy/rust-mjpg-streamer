@@ -9,10 +9,15 @@ authors = ["Danny Hadley <dadleyy@gmail.com>"]
 description = "an application that will stream content from an v4l capable webcam as mjpg over http"
 
 [dependencies]
-async-std = "1.12.0"
+async-std = { version = "^1.12.0" }
 clap = { version = "^4.0.23", features = ["derive", "cargo"] }
-env_logger = "0.9.3"
-futures = "0.3.25"
-log = "0.4.17"
-tide = "0.16.0"
+env_logger = { version = "^0.9.3" }
+futures = { version = "^0.3.25" }
+jpeg-decoder = { version = "^0.3.0", optional = true }
+log = { version = "^0.4.17" }
+tide = { version = "^0.16.0" }
 v4l = { version = "^0.13.0", features = ["v4l2"] }
+
+[features]
+default = []
+validation = ["jpeg-decoder"]
